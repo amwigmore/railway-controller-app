@@ -38,6 +38,7 @@ class SerialService {
   async sendCommand(command, expectedOpcode) {
     return new Promise((resolve, reject) => {
       const timeout = setTimeout(() => {
+        
         reject(`Timeout waiting for response to command: ${command}`);
       }, 2000);
 
@@ -60,13 +61,16 @@ class SerialService {
     const { opcode, params } = response;
 
     // Find matching pending request
+    //console.log("Pending Requests:", this.pendingRequests);
+    //console.log("Response:", opcode);
     const requestIndex = this.pendingRequests.findIndex(
       (req) => req.expectedOpcode === opcode
     );
-
+    console.log("Request Index:", opcode, requestIndex);
     if (requestIndex !== -1) {
       const { resolve, timeout } = this.pendingRequests.splice(requestIndex, 1)[0];
       clearTimeout(timeout);
+      //console.log("Request Index timeout:", timeout);
       resolve({ opcode, params });
     } else {
       // No matching request → treat as unsolicited
@@ -162,10 +166,12 @@ class SerialService {
       functions: functions ? functions.split('/') : [],
       direction: 1,
       speed: 0,
+      requestedSpeed: 0,
       locations: [],
       route:{
         start:null,
         end:null,
+        path:null,
       }
     };
   }
