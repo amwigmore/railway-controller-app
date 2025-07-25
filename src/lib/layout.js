@@ -1,79 +1,183 @@
+// Layout.js
+import Loco from './loco.js';
 class Layout extends EventTarget {
     
 
-    constructor(state) {
-        super();
-        this.state=state;
-
-    }
+  constructor(state) {
+    super();
+    this.state = state;
+  }
   
-    // Method to initialize or load layout
-    init() {
-        this.state.roster = [{
-              id:3,
-              label:"Flying Scotsman",
-              color:"#FF0000",
-              speed:0,
-              requestedSpeed:0,
-              direction:1,
-              locations:[],
-              route:{
-                start:null,
-                end:null,
-                active:false,
-              }
-            }, {
-              id:4,
-              label:"Thomas",
-              color:"#0000FF",
-              speed:0,
-              requestedSpeed:0,
-              direction:1,
-              locations:[],
-              route:{
-                start:null,
-                end:null,
-                active:false,
-              }
-            }];
+  init() {
+    this.state.roster = [
+        new Loco({ id: 3, label: "Flying Scotsman", color: "#FF0000", speed: 0, requestedSpeed: 0, direction: 1, route: { start: null, end: null, active: false } }, this),
+        new Loco({ id: 4, label: "Thomas", color: "#0000FF", speed: 0, requestedSpeed: 0, direction: 1, route: { start: null, end: null, active: false } }, this)
+    ];
 
-        
+    window.electronAPI.onConnected((data) => {
+        //this.addLogEntry("layout", `Connected to ${data}`);
+        //this.state.connectionInfo = "Connected to " + data;
+        //this.state.isConnected = true;
 
-        window.electronAPI.onConnected((data) => {
-            let me=this;
-            me.addLogEntry("layout", `Connected to ${data}`);
-            me.state.connectionInfo="Connected to "+data;
-            me.state.isConnected=true;
+         this.onPortConnected("Connected to " + data);
+    });
 
-            setTimeout(()=>{ 
-                //console.log(`Requesting roster`);
-                let roster=me.requestRoster();
-                me.addLogEntry("layout", `Roster: ${roster.length} locomotives found`);
-              }, 2000)
-          });
-      
-          window.electronAPI.onPinChanged((data) => {
-            let me=this;
-            me.onPinChanged(data.pin,data.state );
-          });
-      
-          window.electronAPI.onSerialData((event, id, data) => {
-           
-      
-            if ("port-connected"===id) {
-              me.addLogEntry("layout", `Connected to ${data}`);
-              me.state.connectionInfo="Connected to "+data;
-              setTimeout(()=>{ 
-                let roster=me.requestRoster();
-                me.addLogEntry("layout", `Roster: ${roster.length} locomotives found`);
-              }, 1000)
-             
-            } else {
-              me.addSerialOutput(id+":"+data);
-            }
-          });
+    window.electronAPI.onDisconnected((data) => {
+        this.addLogEntry("layout", `Disconnected from ${data}`);  
+        this.state.connectionInfo = "Disconnected";
+        this.state.isConnected = false;
+    });
+
+    window.electronAPI.isSerialConnected().then((isConnected) => {
+        if (isConnected) {
+            //this.addLogEntry("layout", "Already connected to serial port.");
+            //this.state.connectionInfo = "Connected";
+            //this.state.isConnected = true;
+            this.onPortConnected("Already connected to serial port.");
+        } else {
+            this.addLogEntry("layout", "Not connected to serial port.");
+            this.state.connectionInfo = "Disconnected";
+            this.state.isConnected = false;
+        }
+    });
+
+    window.electronAPI.onLog((data) => {
+        this.addLogEntry("serial", data);
+    });
+
+    window.electronAPI.onPinChanged((data) => {
+        this.onPinChanged(data.pin, data.state);
+    });
+
+    window.electronAPI.onSerialData((event, id, data) => {
+        if (id === "port-connected") {
+            //this.addLogEntry("layout", `Connected to ${data} (raw)`);
+            //this.state.connectionInfo = "Connected to " + data;
+            this.onPortConnected(`Connected to ${data} (raw)`);
+        } else {
+            this.addSerialOutput(id + ":" + data);
+        }
+    });
+
+
+
+  }
+
+  onPortConnected(connectionInfo, delay = 2000) {
+    this.addLogEntry("layout", connectionInfo);
+    this.state.connectionInfo = connectionInfo;
+    this.state.isConnected = true;
+
+    if (delay > 0) {
+      setTimeout(() => {
+        this.postStartUp();
+      }, delay);
+      return;
+    } else {
+      this.postStartUp();
     }
-  
+    
+  }
+  postStartUp() {
+    this.requestRoster();
+    this.resetPoints();
+  }
+
+  onPinChanged(pin, value) {
+      const blockInfo = this.state.blockLookup[pin];
+      if (!blockInfo) {
+        console.error(`Block info not found for pin: ${pin}`);
+        return;
+      }
+      if (blockInfo.value === value) return; // No change
+      this.addLogEntry("layout", `Block ${pin} changed to ${value}`);
+            
+      pin = blockInfo.pin;
+
+      blockInfo.value = value;
+
+      this.dispatchEvent(new CustomEvent('pin-changed', {
+          detail: { blockInfo, value }
+      }));
+
+      if (value === 0) {
+          this.state.roster.forEach(loco => {
+            /*
+              if (loco.locations.includes(pin)) {
+                  loco.blockLocationChanged(pin, 0);
+              }
+                  */
+          });
+          return;
+      }
+
+      const possibleMatches = { fwd: [], back: [] };
+      Object.values(this.state.blockLookup).forEach(value => {
+          if (value.forward.connections.includes(pin)) {
+              possibleMatches.fwd.push(value);
+          }
+          if (value.backward.connections.includes(pin)) {
+              possibleMatches.back.push(value);
+          }
+      });
+
+      let found = false;
+      let lastBlockLoco = null;
+
+      this.state.roster.forEach(loco => {
+          if (!loco.speed) return;
+
+          if (loco.direction === 1) {
+              possibleMatches.fwd.forEach(blockInfo => {
+                  if (loco.isOccupyingBlock(blockInfo.pin)) {
+                      found = true;
+                      loco.blockLocationChanged(pin, 1);
+                  }
+              });
+          } else {
+              possibleMatches.back.forEach(blockInfo => {
+                  if (loco.isOccupyingBlock(blockInfo.pin)) {
+                      found = true;
+                      loco.blockLocationChanged(pin, 1);
+                  }
+              });
+          }
+
+
+          if (loco._lastBlockId === pin && loco.hasPosition()) {
+              lastBlockLoco = loco;
+          }
+
+      });
+
+      if (!found && lastBlockLoco) {
+          this.addLogEntry("layout", `Guessed that last block loco ${lastBlockLoco.id} is at ${pin}`);
+          lastBlockLoco.blockLocationChanged(pin, 1);
+          found = true;
+      }
+
+      if (!found) {
+          const movingLocos = this.state.roster.filter(loco => loco.speed > 0);
+          if (movingLocos.length === 0) {
+              this.addLogEntry("layout", `No loco found for block ${pin}`);
+              this.resolveBlockConnection(pin);
+          } else if (movingLocos.length === 1) {
+              this.addLogEntry("layout", `Guessed that moving loco ${movingLocos[0].id} is at ${pin}`);
+              movingLocos[0].blockLocationChanged(pin, 1);
+              found = true;
+          } else {
+              this.addLogEntry("layout", `Multiple moving locos for block ${pin}`);
+          }
+      }
+    }
+    
+    //attempt to match a block connection to a loco
+    resolveBlockConnection(pin) {
+       this.state.matchLocoModal = {
+        show: true,
+        pin,
+      };
+    }
     
     processLayoutSvg(svg) {
         let me=this;
@@ -107,12 +211,14 @@ class Layout extends EventTarget {
                 console.error(`No adjancienes for ${descValue}`)
               }
               blockLookupMap[pathInfo.id] = {
-                  //element: element,
+                  element: element, //base element
                   id: pathInfo.id,
                   pin: pathInfo.id,
                   forward: pathInfo.forward,
                   backward: pathInfo.backward,
                   value: 0,
+                  length: pathInfo.length,
+                  speedlimit: pathInfo.speedlimit,
               };
 
               elementLookup.blocks[pathInfo.id]=element;
@@ -135,7 +241,7 @@ class Layout extends EventTarget {
         return elementLookup;
     }
     parseSegment(segmentStr) {
-        let [id, forwardData, backwardData] = segmentStr.split("|");
+        let [id, forwardData, backwardData, length, speedlimit] = segmentStr.split("|");
 
         function parseConnection(data) {
             if (!data) return {
@@ -149,11 +255,15 @@ class Layout extends EventTarget {
                 connections: [straight, diverging].filter(d=>d)
             };
         }
-
+        if (!length || !speedlimit) {
+          console.log(`Parsing segment: ${segmentStr}. ID: ${id}, Length: ${length}, Speedlimit: ${speedlimit}`);
+        }
         return {
           id,
-            forward: parseConnection(forwardData),
-            backward: parseConnection(backwardData)
+          forward: parseConnection(forwardData),
+          backward: parseConnection(backwardData),
+          length,
+          speedlimit
         };
     }
 
@@ -201,7 +311,50 @@ class Layout extends EventTarget {
           state:0,
         };
     }
-
+    getActiveForwardConnection(block) {
+        if (!block.forward.pointId) {
+            // No turnout here, just return the first connection
+            return block.forward.connections[0];
+        }
+    
+        const point = this.state.pointLookup[block.forward.pointId];
+        if (!point) return null;
+    
+        const state = point.state; // 0 = straight, 1 = diverging
+      return block.forward.connections[state===1?0:1];
+    }
+    
+    getActiveBackwardConnection(block) {
+        if (!block.backward.pointId) {
+            return block.backward.connections[0];
+        }
+    
+        const point = this.state.pointLookup[block.backward.pointId];
+        if (!point) return null;
+    
+        const state = point.state;
+        return block.backward.connections[state===1?0:1];
+    }
+    isBlockOccupied(blockId) {
+        if (!blockId) return false;
+    
+        for (const loco of this.state.roster) {
+            const pos = loco.trainPosition;
+            if (!pos) continue;
+    
+            // Match start, end, or any intermediate occupied block
+            if (
+                pos.startBlockId === blockId ||
+                pos.endBlockId === blockId ||
+                (Array.isArray(pos.occupiedBlocks) && pos.occupiedBlocks.includes(blockId))
+            ) {
+                return loco;
+            }
+        }
+    
+        return null;
+    }
+    
     findShortestPath(startId, endId) {
         const blockLookup = this.state.blockLookup;
         let me=this;
@@ -320,62 +473,12 @@ class Layout extends EventTarget {
     async requestRoster() {
         let me=this;
         const response = await window.electronAPI.requestRoster();
-        //console.log("Roster Response:", response);
-       
-        me.state.roster = response;
+        this.state.roster = response.map(data => new Loco(data, this));
     }
     
 
-    stopLoco(loco) {
-        loco.speed=0;
-        this.setCabSpeed(loco);
-      }
-      
-    updateSpeedDirection(loco) {
-        this.setCabSpeed(loco);
-    }
+   
 
-    setCabSpeed(loco) {
-        let me=this;
-
-        if (!me.state.isConnected) return;
-        window.electronAPI.setCabSpeed(loco.id, loco.speed, loco.direction)
-          .then((response) => {
-            me.addSerialOutput(`Cab Speed Response: ${response}`);
-          });
-    }
-
-    setLocoRouteStart(loco, blockInfo) {
-        let me=this;
-        loco.route.start=blockInfo;
-        if (loco.route.start && loco.route.end) {
-          loco.route.path=me.findShortestPath(loco.route.start, loco.route.end);
-         // me.renderRoute(loco);
-        }
-    }
-
-    setLocoRouteEnd(loco, blockInfo) {
-        let me=this;
-        loco.route.end=blockInfo;
-        if (loco.route.start && loco.route.end) {
-          loco.route.path=me.findShortestPath(loco.route.start, loco.route.end);
-         // me.renderRoute(loco);
-        }
-    }
-    reverseRoute(loco) {
-        let me=this;
-        if (loco.route.start && loco.route.end) {
-            const end=loco.route.end;
-            loco.route.end=loco.route.start;
-            loco.route.start=end;
-            loco.route.path=me.findShortestPath(loco.route.start, loco.route.end);
-        }
-    }
-    clearRoute(loco) {
-        loco.route.end=null;
-        loco.route.start=null;
-        loco.route.path=null;
-    }
    
     emergencyStop() {
         let me=this;
@@ -417,7 +520,7 @@ class Layout extends EventTarget {
     setPointState(point, state) {
         let me=this;
         point.state=state;
-
+        //DCC EX POINT STATE 0==straight, 1==diverging
         if (!me.state.isConnected) return;
         window.electronAPI.setTurnoutState(point.vpin, point.state).then((response) => {
           me.addSerialOutput(`Turnout Response: ${response}`);
@@ -430,213 +533,25 @@ class Layout extends EventTarget {
         this.state.serialOutput=msg+"<br/>"+this.serialOutput;
     }
 
-
-    onPinChanged(pin, value) {
-        let me=this;
-        const blockInfo=me.state.blockLookup[pin];
-        if (!blockInfo) return;
-        blockInfo.value=value;
-        pin=blockInfo.pin;
-  
-        this.dispatchEvent(new CustomEvent('pin-changed', {
-            detail: { blockInfo, value }
-        }));
-  
-        if (value===0) {
-  
-          me.state.roster.forEach(d=> {
-            if (d.locations.includes(pin)) {
-              me.locoBlockLocationChanged(d, pin, 0);
-            }
-          });
-  
-          return;
-        }
-  
-        const possibleMatches={fwd:[], back:[]};
-  
-  
-  
-        Object.keys(me.state.blockLookup).forEach(key => {
-          const value=me.state.blockLookup[key]
-          if (value.forward.connections.includes(pin)) {
-            possibleMatches.fwd.push(value);
-          }
-          if (value.backward.connections.includes(pin)) {
-            possibleMatches.back.push(value);
-          }
-          
-        });
-        
-        //console.log(`${pin} entry - fwd: ${possibleMatches.fwd.reduce((a, d) => a+","+d.pin,"")}, back: ${possibleMatches.back.reduce((a, d) => a+","+d.pin,"")}`)
-        me.addLogEntry("layout", `Pin ${pin} entry detected - fwd: ${possibleMatches.fwd.reduce((a, d) => a+","+d.pin,"")}, back: ${possibleMatches.back.reduce((a, d) => a+","+d.pin,"")}`);
-        //console.log(`Pin ${pin} entry - fwd: ${possibleMatches.fwd.reduce((a, d) => a+","+d.pin,"")}, back: ${possibleMatches.back.reduce((a, d) => a+","+d.pin,"")}`)
-        let found=false;
-        let lastBlockLoco = null;
-        me.state.roster.forEach(d=> {
-            if (!d.speed) return;
-            
-            if (d.direction===1) {
-              possibleMatches.fwd.forEach(blockInfo=>{
-                if (d.locations.includes(blockInfo.pin)) {
-                  found=true;
-                  me.locoBlockLocationChanged(d, pin, 1);
-                }
-              });
-            } else {
-              possibleMatches.back.forEach(blockInfo=>{
-                if (d.locations.includes(blockInfo.pin)) {
-                  found=true;
-                  me.locoBlockLocationChanged(d, pin, 1);
-                }
-              });
-            }
-            
-            if (d._lastBlockId && d._lastBlockId===pin && d.locations.length===0) {
-              lastBlockLoco=d;
-              
-            }
-
-           
-
-        });
-        //fall back to last block loco if no match found
-        if (!found && lastBlockLoco) {
-         // console.log(`Guessed that last block loco ${lastBlockLoco.id} is at ${pin}`);
-          me.addLogEntry("layout", `Guessed that last block loco ${lastBlockLoco.id} is at ${pin}`);
-          me.locoBlockLocationChanged(lastBlockLoco, pin, 1);
-          found=true;
-        }
-        if (!found) {
-          let movingLocos = me.state.roster.filter(d=> d.speed>0);
-          if (movingLocos.length===0) {
-            //console.log(`No loco found for block ${pin}`);
-            me.addLogEntry("layout", `No loco found for block ${pin}`);
-          } else if (movingLocos.length===1) {
-            //console.log(`Guessed that loco ${movingLocos[0].id} is at ${pin}`);
-            me.addLogEntry("layout", `Guessed that moving loco ${movingLocos[0].id} is at ${pin}`);
-            me.locoBlockLocationChanged(movingLocos[0], pin, 1);
-            found=true;
-          } else if (movingLocos.length>1) {
-            //console.log(`Multiple locos found for block ${pin}`);
-            me.addLogEntry("layout", `Multiple locos found for block ${pin}`);
-          }
-        }
-        if (!found) {
-          //console.log(`No loco found for block ${pin}`);
-          me.addLogEntry("layout", `No loco found for block ${pin}`);
-        }
-       
-      }
-      
-
-      locoBlockLocationChanged(loco, blockId, state) {
-        let me = this;
-      
-        // Ensure loco has a debounce tracker
-        if (!loco._debounceTimers) {
-          loco._debounceTimers = {};
-        }
-      
-        if (state === 1) {
-          // Cancel any pending debounce removal
-          if (loco._debounceTimers[blockId]) {
-            clearTimeout(loco._debounceTimers[blockId]);
-            delete loco._debounceTimers[blockId];
-          }
-      
-          if (!loco.locations.includes(blockId)) {
-            loco.locations.push(blockId);
-          }
-      
-        } else {
-          // Debounce block exit
-          if (loco._debounceTimers[blockId]) {
-            clearTimeout(loco._debounceTimers[blockId]);
-          }
-      
-          loco._debounceTimers[blockId] = setTimeout(() => {
-            // Final check: only remove if it's still there
-            loco.locations = loco.locations.filter(id => id !== blockId);
-      
-            if (loco.locations.length === 0) {
-              //console.log(`Loco ${loco.label} left block ${blockId} with no more locations`);
-              me.addLogEntry("layout", `Loco ${loco.label} left block ${blockId} with no more locations`);
-            }
-            loco._lastBlockId = blockId;
-
-            delete loco._debounceTimers[blockId];
-      
-            if (me.hasActiveRoute(loco)) {
-              me.handleLocoRouteBlockLocationChanged(loco);
-            }
-          }, 1000); // Adjust debounce time as needed
-        }
-      }
-
-      handleLocoRouteBlockLocationChanged(loco) {
-          let me=this;
-          if (loco.locations.length>1) {
-            return;
-          }
-          
-          const path=loco && loco.route.path;
-          const currentHeadLocation=me.getCurrentLocoHeaderRouteStep(loco);
-          if (currentHeadLocation>=path.length-1) {
-            loco.speed=0;
-            //console.log(`Loco ${loco.label} reached end of route`);
-            me.addLogEntry("layout", `Loco ${loco.label} reached end of route`);
-            loco.requestedSpeed=0;
-            this.setCabSpeed(loco);
-            return;
-          }
-          const nextSegment=path[currentHeadLocation];
-          if (!nextSegment) {
-            return;
-          }
-          if (nextSegment.type==="point") { 
-            
-          }
-          let locoSpeedChanged=false;
-          if (nextSegment.direction==="forward" && loco.direction!==1) {
-            loco.direction=1;
-            locoSpeedChanged=true;
-          } else if (nextSegment.direction==="backward" && loco.direction!==0) {
-            loco.direction=0;
-            locoSpeedChanged=true;
-          }
-
-          setTimeout(()=>{
-            me.setPointsForRoute(loco, 1);
-            if (locoSpeedChanged) me.setCabSpeed(loco);
-          }, 2000);
-
-          
-
-      }
-
-      simulateNext() {
+    /*
+    simulateNext() {
         let me = this;
         me.state.roster.forEach(loco=>{
-          if (!me.hasActiveRoute(loco) || !loco.locations.length) return;
-          if (loco.locations.length>1) {
+
+          if (!loco.hasActiveRoute() || !loco.hasPosition()) return;
+
+          if (loco.hasPosition()) {
             me.onPinChanged(loco.locations[0], 0);
             return;
           }
-          let currentHeadLocation=me.getCurrentLocoHeaderRouteStep(loco);
+
+          let currentHeadLocation = loco.getCurrentRouteStep();
           if (currentHeadLocation==-1) {
 
             return;
           }
           const path=loco && loco.route.path;
-          /*
-          if (currentHeadLocation===path.length) {
-            loco.speed=0;
-            loco.requestedSpeed=0;
-            this.setCabSpeed(loco);
-            return;
-          }
-            */
+
           let nextSegment=path.reduce((a, step, i)=>{
             if (a || i<=currentHeadLocation || step.type!=="segment") return a;
             return step;
@@ -653,82 +568,7 @@ class Layout extends EventTarget {
             
           });
       }
-
-      hasActiveRoute(loco) {
-        let me=this;
-        const path=loco && loco.route.path;
-        return path && loco.route.active && loco.requestedSpeed>0;
-      }
-
-
-      startRoute(loco, speed = 75) {
-        let me=this;
-        const path=loco && loco.route.path;
-        if (!path) return;
-        let firstStep=loco.route.path[0]
-
-        loco.requestedSpeed = speed;
-        loco.locations = [firstStep.id];
-        loco.speed=speed;
-        loco.direction=firstStep.direction==="forward"? 1 : 0;
-        loco.route.active=true;
-        me.setPointsForRoute(loco, 1);
-
-        me.setCabSpeed(loco);
-      }
-      
-
-      getCurrentLocoHeaderRouteStep(loco) {
-        const path=loco && loco.route.path;
-        if (!path) return;
-        let currentHeadLocation=path.reduce((a, step, i)=>{
-          if (loco.locations.includes(step.id)) {
-            return i;
-          }
-          return a;
-
-        }, -1);
-        return currentHeadLocation;
-      }
-      
-      setPointsForRoute(loco, maxStepsAhead = -1) {
-        let me=this;
-        let currentHeadLocation=this.getCurrentLocoHeaderRouteStep(loco);
-        /*
-        const path=loco && loco.route.path;
-        if (!path) return;
-        let currentHeadLocation=path.reduce((a, step, i)=>{
-          if (loco.locations.includes(step.id)) {
-            return i;
-          }
-          return a;
-
-        }, -1);
-        */
-        if (currentHeadLocation===-1) {
-         // console.log("Loco not found on route");
-          me.addLogEntry("layout", `Loco ${loco.label} not found on route`);
-          return;
-        }
-        const path=loco && loco.route.path;
-        let maxStep=maxStepsAhead != -1? currentHeadLocation+maxStepsAhead+1 : path.length
-        if (maxStep>path.length) {
-          maxStep=path.length;
-        }
-
-        for (let i=currentHeadLocation; i<maxStep; i++) {
-          const step=path[i];
-          if (step.type==="point") {
-            const point=me.state.pointLookup[step.id];
-            if (point) {
-              me.setPointState(point, step.direction==="straight"? 1 : 0);
-            }
-          }
-        }
-
-
-      }
-
+*/
       getBlocksWithRoute() {
         const blockWithRoute={
 

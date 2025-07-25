@@ -3,34 +3,39 @@ const { ReadlineParser } = require('@serialport/parser-readline');
 
 class SerialService {
   constructor(port, baudRate = 115200) {
-    console.log("Opening SerialService");
-
     this.port = new SerialPort({ path: port, baudRate });
     this.parser = this.port.pipe(new ReadlineParser({ delimiter: '\n' }));
     this.listeners = [];
     this.pendingRequests = []; // Queue for matching responses
+    this.isConnected = false;
 
     // Handle incoming serial data
     this.parser.on('data', (data) => {
-      //console.log("Received:", data);
       const response = this.parseResponseString(data);
       if (response) {
-        console.warn("Parsed:", data);
+        this.log("Parsed: " + data);
         this.handleResponse(response);
       } else {
-        console.warn("Unparsable:", data);
+        this.log("Unparsable: " + data);
         this.listeners.forEach((callback) => callback('unsolicited-data', data));
       }
     });
 
     // Handle serial port errors
     this.port.on('error', (err) => {
-      console.error("Serial Port Error:", err.message);
+      this.log("Serial Port Error: " + err.message);
     });
 
     this.port.on('open', () => {
-      console.log(`Serial Port ${port} connected.`);
+      this.isConnected = true;
+      this.log(`Serial Port ${port} connected.`);
       this.listeners.forEach((callback) => callback('port-connected', port));
+    });
+
+    this.port.on('close', () => {
+      this.isConnected = false;
+      this.log(`Serial Port ${port} disconnected.`);
+      this.listeners.forEach((callback) => callback('port-disconnected', port));
     });
   }
 
@@ -38,14 +43,13 @@ class SerialService {
   async sendCommand(command, expectedOpcode) {
     return new Promise((resolve, reject) => {
       const timeout = setTimeout(() => {
-        
         reject(`Timeout waiting for response to command: ${command}`);
       }, 2000);
 
       // Queue request with expected opcode
       this.pendingRequests.push({ expectedOpcode, resolve, reject, timeout });
 
-      console.log("Sending Command:", command);
+      this.log("Sending Command: " + command);
 
       this.port.write(`${command}\n`, (err) => {
         if (err) {
@@ -55,36 +59,38 @@ class SerialService {
       });
     });
   }
-
+  log(message) {
+    console.log("SerialService Log:", message);
+    callback('on-log', message)
+  }
   // ✅ Handle response and match by opcode
   handleResponse(response) {
     const { opcode, params } = response;
 
     // Find matching pending request
-    //console.log("Pending Requests:", this.pendingRequests);
-    //console.log("Response:", opcode);
+    //this.log("Pending Requests: " + JSON.stringify(this.pendingRequests));
+    //this.log("Response: " + opcode);
     const requestIndex = this.pendingRequests.findIndex(
       (req) => req.expectedOpcode === opcode
     );
-    console.log("Request Index:", opcode, requestIndex);
+    this.log("Request Index: " + opcode + " " + requestIndex);
     if (requestIndex !== -1) {
       const { resolve, timeout } = this.pendingRequests.splice(requestIndex, 1)[0];
       clearTimeout(timeout);
-      //console.log("Request Index timeout:", timeout);
+      //this.log("Request Index timeout: " + timeout);
       resolve({ opcode, params });
     } else {
       // No matching request → treat as unsolicited
-      //console.log("Unsolicited data received:", response);
+      //this.log("Unsolicited data received: " + JSON.stringify(response));
       if ("Q"===opcode) {
-        console.log(`on-pin ${params[0]}=1`);
+        this.log(`on-pin ${params[0]}=1`);
         this.listeners.forEach((callback) => callback('on-pin', {pin: params[0], state: 1}));
       } else if ("q"===opcode) {
-        console.log(`on-pin ${params[0]}=0`);
+        this.log(`on-pin ${params[0]}=0`);
         this.listeners.forEach((callback) => callback('on-pin', {pin: params[0], state:0}));
       } else {
         this.listeners.forEach((callback) => callback('unsolicited-data', response));
       }
-      
     }
   }
 
@@ -115,9 +121,9 @@ class SerialService {
   
     return { opcode, params };
   }
-  
-  
-
+  isConnected() {
+    return this.isConnected;  
+  }
   // ✅ Request Roster and fetch details for each loco
   async requestRoster() {
     try {
@@ -133,7 +139,7 @@ class SerialService {
             const locoResponse = await this.sendCommand(`<J R ${id}>`, 'jR');
             return this.parseLocoDetails(locoResponse);
           } catch (locoError) {
-            console.error(`Error fetching details for loco ID ${id}:`, locoError);
+            this.log(`Error fetching details for loco ID ${id}: ${locoError}`);
             return null;
           }
         })
@@ -141,7 +147,7 @@ class SerialService {
 
       return locoDetails.filter(Boolean); // Remove nulls from failed requests
     } catch (error) {
-      console.error(`Error fetching roster: ${error}`);
+      this.log(`Error fetching roster: ${error}`);
       throw error;
     }
   }
@@ -155,7 +161,7 @@ class SerialService {
   parseLocoDetails(response) {
     const match = response.opcode.match(/^jR$/);
     if (!match) {
-      console.warn("Malformed response:", response);
+      this.log("Malformed response: " + JSON.stringify(response));
       return null;
     }
 
@@ -211,18 +217,16 @@ class SerialService {
     if (!parsedResponse) return;
 
     if (parsedResponse.opcode === "Q") {
-      console.log(`Pin ${parsedResponse.params[0]} on`);
+      this.log(`Pin ${parsedResponse.params[0]} on`);
     } else if (parsedResponse.opcode === "q") {
-      console.log(`Pin ${parsedResponse.params[0]} off`);
+      this.log(`Pin ${parsedResponse.params[0]} off`);
     }
   }
 
   // ✅ Subscribe to incoming serial data
   on(eventType, callback) {
     this.listeners.push((event, data) => {
-     // console.log(`on ${event}`);
       if (event === eventType) {
-        //console.log(`\tcallback ${event}`);
         callback(event,data);
       }
     });

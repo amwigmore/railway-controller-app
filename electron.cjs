@@ -7,30 +7,54 @@ const SerialService = require('./serialService.cjs');
 let mainWindow;
 let serial;
 
+
 function createWindow() {
   mainWindow = new BrowserWindow({
-    width: 800,
-    height: 600,
+    width: 1024,
+    height: 800,
     webPreferences: {
       preload: path.join(__dirname, 'preload.cjs'), // optional
-      contextIsolation: true, // ✅ Must be true for contextBridge
-      nodeIntegration: false, // ✅ Keep false for security
-      enableRemoteModule: false // ✅ Optional, for security
+      contextIsolation: true,
+      nodeIntegration: false,
+      enableRemoteModule: false
     }
   });
 
-  mainWindow.loadURL('http://localhost:5173'); // Vite dev server
-  // win.loadFile('dist/index.html'); // For production
+ 
+  
+
+  // ✅ Optional: show dev tools for debugging
+  // mainWindow.webContents.openDevTools();
+
+  // ✅ Catch and log loading failures
+  mainWindow.webContents.on('did-fail-load', (event, errorCode, errorDescription) => {
+    console.error('Failed to load index.html:', errorDescription);
+  });
 
   mainWindow.on('closed', () => {
     mainWindow = null;
     closeSerialPort();
   });
 
-  // ✅ Start serial port listener after the window is created
+  ipcMain.handle('is-serial-connected', async () => {
+    return await serial!=null && serial.isConnected();
+  });
+
   startSerialPortListener();
 
+
+   // ✅ Load the built Vue file
+  console.log("NODE_ENV:", process.env.NODE_ENV);
+  if (process.env.NODE_ENV === 'development') {
+    mainWindow.loadURL('http://localhost:5173');
+    mainWindow.webContents.openDevTools();
+  } else {
+    mainWindow.loadFile(path.join(__dirname, 'dist', 'index.html'));
+  }
 }
+
+
+
 
 app.whenReady().then(createWindow);
 
@@ -111,6 +135,8 @@ function openSerialPort(port) {
 
   serial = new SerialService(port.path); // Replace with your actual port
   
+  
+
   // Send generic command
   ipcMain.handle('send-command', async (event, command) => {
     return await serial.sendCommand(command);
@@ -141,11 +167,24 @@ function openSerialPort(port) {
   ipcMain.handle('query-pin-status', async () => {
     return await serial.queryPinStatus();
   });
+ 
 
   // Set Turnout State
   ipcMain.handle('set-turnout-state', async (event, turnoutId, throwState) => {
     return await serial.setTurnoutState(turnoutId, throwState);
   });
+
+  // Forward log messages from SerialService to the renderer process UI log
+  serial.on('on-log', (msg) => {
+    if (mainWindow && mainWindow.webContents) {
+      mainWindow.webContents.send('serial-log', {
+        timestamp: Date.now(),
+        source: 'serial',
+        message: msg
+      });
+    }
+  });
+
 
   // Forward serial data to renderer
   serial.on('serial-data', (event, data) => {
@@ -156,39 +195,18 @@ function openSerialPort(port) {
     //console.log(`Sending ${event}, ${data}`)
     mainWindow.webContents.send('port-connected', data);
   });
-  
+
+  // Forward serial data to renderer
+  serial.on('port-disconnected', (event, data) => {
+    mainWindow.webContents.send('port-disconnected', data); 
+  });
+
    // Forward serial data to renderer
    serial.on('on-pin', (event, data) => {
     //console.log(`on-pin ${data.pin}, ${data.state}`)
     mainWindow.webContents.send('on-pin', data);
   });
 
-  /*s
-  serialPort = new SerialPort({
-    path: port.path,    // e.g., 'COM3' or '/dev/ttyUSB0'
-    baudRate: 115200,
-    dataBits: 8,
-    stopBits: 1,
-    parity: 'none',
-  });
-
-  const { ReadlineParser } = require('@serialport/parser-readline');
-
-  const parser = serialPort.pipe(new ReadlineParser({ delimiter: '\n' })); // Adjust delimiter if needed
-
-  parser.on('data', (data) => {
-    console.log('Received:', data);  // Check terminal for incoming data
-    mainWindow.webContents.send('electron-to-vue', { msg: data });
-        
-  });
-
-  serialPort.on('error', (err) => {
-    console.error('Serial Port Error:', err.message);
-    mainWindow.webContents.send('electron-to-vue', { msg: 'Serial Port Error:'+err.message });
-  });
-
-  mainWindow.webContents.send('port-connected', { msg: port.path });
-    */
 };
 
 ipcMain.on('open-port', async (event, portName) => {

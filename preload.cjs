@@ -6,9 +6,14 @@ contextBridge.exposeInMainWorld('electronAPI', {
    sendToElectron: (data) => ipcRenderer.send('vue-to-electron', data),
    onReceiveFromElectron: (callback) => ipcRenderer.on('electron-to-vue', (event, data) => callback(data)),
    */
+   onLog: (callback)  => ipcRenderer.on('on-log', (event, data) => callback(data)),
+   
    onConnected: (callback)  => ipcRenderer.on('port-connected', (event, data) => callback(data)),
+   onDisconnected: (callback)  => ipcRenderer.on('port-disconnected', (event, data) => callback(data)),
+   
    onPinChanged: (callback)  => ipcRenderer.on('on-pin', (event, data) => callback(data)),
    
+   isSerialConnected: () => ipcRenderer.invoke('is-serial-connected'),
    sendCommand: (command) => ipcRenderer.invoke('send-command', command),
    requestRoster: () => ipcRenderer.invoke('request-roster'),
    setCabSpeed: (cabNumber, speed, direction) => ipcRenderer.invoke('set-cab-speed', cabNumber, speed, direction),
@@ -17,6 +22,6 @@ contextBridge.exposeInMainWorld('electronAPI', {
    queryPinStatus: () => ipcRenderer.invoke('query-pin-status'),
    setTurnoutState: (turnoutId, throwState) => ipcRenderer.invoke('set-turnout-state', turnoutId, throwState),
    onSerialData: (callback) => ipcRenderer.on('serial-data', (event, id, data) => callback(event, id, data)),
- 
+    
 });
 

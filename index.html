@@ -4,10 +4,17 @@
     <meta charset="UTF-8" />
     <link rel="icon" type="image/svg+xml" href="/vite.svg" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Vite + Vue</title>
+    <title>Railway Controller</title>
   </head>
   <body>
     <div id="app" class="vh-100 vw-100"></div>
+    <script type="module">
+    if (import.meta.env.MODE === 'development') {
+      document.body.insertAdjacentHTML('beforeend', '<div style="position:fixed;top:0;right:0;background:#ffc;padding:4px 8px;z-index:9999;">DEV MODE</div>');
+    } else {
+      //document.body.insertAdjacentHTML('beforeend', '<div style="position:fixed;top:0;right:0;background:#cfc;padding:4px 8px;z-index:9999;">BUILD MODE</div>');
+    }
+  </script>
     <script type="module" src="/src/main.js"></script>
   </body>
 </html>

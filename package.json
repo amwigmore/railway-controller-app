@@ -1,13 +1,16 @@
 {
   "name": "railway-controller-app",
   "private": true,
-  "version": "0.0.0",
+  "version": "1.0.0",
   "type": "module",
   "scripts": {
-    "dev": "vite",
+    "dev": "cross-env NODE_ENV=development vite",
+    "electron-dev": "cross-env NODE_ENV=development electron electron.cjs",
     "electron": "electron electron.cjs",
     "build": "vite build",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "build:pi": "npm run build && npx electron-builder --linux --armv7l",
+    "build:pi64": "npm run build && electron-builder --linux --arm64"
   },
   "dependencies": {
     "bootstrap": "^5.3.3",
@@ -17,7 +20,20 @@
   },
   "devDependencies": {
     "@vitejs/plugin-vue": "^5.2.1",
+    "cross-env": "^7.0.3",
     "electron": "^34.2.0",
     "vite": "^6.1.0"
+  },
+  "build": {
+    "appId": "wigmore.railway-controller-app",
+    "productName": "Railway Controller",
+    "files": [
+      "dist/**/*",
+      "electron.cjs"
+    ],
+    "linux": {
+      "target": "AppImage",
+      "category": "Utility"
+    }
   }
 }
