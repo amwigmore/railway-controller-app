@@ -42,7 +42,7 @@ class Layout extends EventTarget {
     });
 
     window.electronAPI.onLog((data) => {
-        this.addLogEntry("serial", data);
+        this.addLogEntry("serial", data.message);
     });
 
     window.electronAPI.onPinChanged((data) => {
@@ -173,10 +173,8 @@ class Layout extends EventTarget {
     
     //attempt to match a block connection to a loco
     resolveBlockConnection(pin) {
-       this.state.matchLocoModal = {
-        show: true,
-        pin,
-      };
+       this.state.matchLocoModal.show = true;
+       this.state.matchLocoModal.pins.push(pin);
     }
     
     processLayoutSvg(svg) {
@@ -506,6 +504,27 @@ class Layout extends EventTarget {
         window.electronAPI.queryPinStatus().then((response) => {
            me.addSerialOutput(`Pin Status: ${response}`);
         });
+        setTimeout(() => {
+            me.refreshLocoPositions();
+        }, 1000);
+    }
+    refreshLocoPositions() {
+      Object.values(this.state.blockLookup).forEach(block => {
+        const loco = this.isBlockOccupied(block.id);
+        if (block.value === 0) {
+          if (loco) {
+            this.addLogEntry("refreshLocoPositions", `Block ${block.id} is not occupied by loco ${loco.id}`);
+            loco.blockLocationChanged(block.pin, 1);
+            loco.blockLocationChanged(block.pin, 0);
+          }
+        } else if (block.value === 1) {
+          if (!loco) {
+            this.addLogEntry("refreshLocoPositions", `Resolving block connection for ${block.pin}`);
+            this.resolveBlockConnection(block.pin);
+          }
+        }
+      });
+
     }
 
     resetPoints() {

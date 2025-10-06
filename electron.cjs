@@ -1,4 +1,5 @@
-const { app, BrowserWindow, ipcMain } = require('electron');
+const { app, BrowserWindow, ipcMain, screen } = require('electron');
+
 const path = require('path');
 const { SerialPort } = require('serialport'); // ✅ Updated import
 const { ReadlineParser } = require('@serialport/parser-readline'); // ✅ Updated import
@@ -7,6 +8,12 @@ const SerialService = require('./serialService.cjs');
 let mainWindow;
 let serial;
 
+// helper: set window to the current work area (respects LXDE panel)
+function fitToWorkArea(win) {
+  if (!win) return;
+  const { workArea } = screen.getPrimaryDisplay(); // {x,y,width,height}
+  win.setBounds(workArea); // avoids covering the panel
+}
 
 function createWindow() {
   mainWindow = new BrowserWindow({
@@ -19,9 +26,6 @@ function createWindow() {
       enableRemoteModule: false
     }
   });
-
- 
-  
 
   // ✅ Optional: show dev tools for debugging
   // mainWindow.webContents.openDevTools();
@@ -51,12 +55,25 @@ function createWindow() {
   } else {
     mainWindow.loadFile(path.join(__dirname, 'dist', 'index.html'));
   }
+  
+  // once the window is ready, snap it to the LXDE work area
+  mainWindow.once('ready-to-show', () => fitToWorkArea(mainWindow));
 }
 
 
 
 
-app.whenReady().then(createWindow);
+
+app.whenReady().then(() => {
+  createWindow();
+
+  // keep the window sized correctly if resolution, rotation, or panel changes
+  const refresh = () => fitToWorkArea(mainWindow);
+  // these cover most changes on Raspberry Pi / LXDE
+  screen.on('display-metrics-changed', refresh);
+  screen.on('display-added', refresh);
+  screen.on('display-removed', refresh);
+});
 
 app.on('activate', () => {
   if (BrowserWindow.getAllWindows().length === 0) createWindow();
@@ -175,14 +192,13 @@ function openSerialPort(port) {
   });
 
   // Forward log messages from SerialService to the renderer process UI log
-  serial.on('on-log', (msg) => {
-    if (mainWindow && mainWindow.webContents) {
-      mainWindow.webContents.send('serial-log', {
+  serial.on('on-log', (event, msg) => {
+    mainWindow.webContents.send('on-log', {
         timestamp: Date.now(),
         source: 'serial',
         message: msg
       });
-    }
+    
   });
 
 
@@ -198,7 +214,7 @@ function openSerialPort(port) {
 
   // Forward serial data to renderer
   serial.on('port-disconnected', (event, data) => {
-    mainWindow.webContents.send('port-disconnected', data); 
+    //mainWindow.webContents.send('port-disconnected', data); 
   });
 
    // Forward serial data to renderer

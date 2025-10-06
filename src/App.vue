@@ -1,53 +1,65 @@
 <template>
   <div class="w-100 h-100 row">
-    <div class="col-2 col-md-1 d-flex flex-column align-items-center justify-content-start pt-2">
+    <div class="col-2 col-md-1 d-flex gap-1 flex-column align-items-center justify-content-start pt-2">
       <i v-if="state.isConnected" class="bi bi-wifi text-success"></i>
       <i v-else class="bi bi-wifi-off text-secondary"></i>
 
-      <button class="btn btn-danger mt-3" @click="emergencyStop()">
-        <i class="bi bi-exclamation-triangle"></i>
+      <!-- Sidebar buttons: make them larger and more spaced -->
+      <button class="btn btn-lg btn-danger mt-4 " @click="emergencyStop()">
+        <i class="bi bi-exclamation-triangle fs-2"></i>
       </button>
-      <button class="btn btn-secondary mt-2" @click="resetPoints()">
-        <i class="bi bi-sign-merge-left"></i>
+      <button class="btn btn-lg btn-secondary mt-3" @click="resetPoints()">
+        <i class="bi bi-sign-merge-left fs-2"></i>
       </button>
-      <button class="btn btn-secondary mt-2" @click="queryPinStatus()">
-        <i class="bi bi-pin"></i>
+      <button class="btn btn-lg btn-secondary mt-3" @click="queryPinStatus()">
+        <i class="bi bi-pin fs-2"></i>
       </button>
-      <button class="btn btn-secondary mt-2" @click="requestRoster()">
-        <i class="bi bi-arrow-repeat"></i>
+      <button class="btn btn-lg btn-secondary mt-3" @click="requestRoster()">
+        <i class="bi bi-arrow-repeat fs-2"></i>
       </button>
       <button
-        class="btn btn-link p-0 m-0 mt-2"
+        class="btn btn-lg btn-link"
         :class="{'text-success': state.isAllowSpeedOverride, 'text-secondary': !state.isAllowSpeedOverride}"
         @click="state.isAllowSpeedOverride = !state.isAllowSpeedOverride"
         type="button"
         id="speedOverrideToggle"
         title="Toggle Speed Override"
-        style="font-size: 1.3rem;"
+        style="font-size: 2.8rem; min-width: 64px; min-height: 64px;"
+
       >
         <i :class="state.isAllowSpeedOverride ? 'bi bi-toggle-on' : 'bi bi-toggle-off'"></i>
       </button>
     </div>
     <div class="col-10 col-md-11 ">
-      <div class="row h-20 bg-light">
+      <div class="row h-20">
         
-        <div class="col-10 d-flex flex-row">
-          <div class="d-flex flex-column justify-content-center" 
-          :class="{'border-primary':item===state.selectedLoco}"
-          :style="{'background-color':hexToRgba(item.color,0.1)}"
-            v-for="item in state.roster" 
-            :key="item.id"
-          >
-            <button class="btn btn-sm btn-text-primary" @click="showLocoControllerPopup(item, $event)">{{ item.label }}</button>
+        <div class="col-10 d-flex flex-row gap-2">
+          <div class="d-flex flex-column justify-content-center rounded " 
+            :class="{'border-primary':item===state.selectedLoco}"
+            :style="{'background-color':hexToRgba(item.color,0.1)}"
+              v-for="item in state.roster" 
+              :key="item.id"
+            >
+             <template v-if="item.warning">
+                <a href="#" class="text-decoration-underline text-danger" @click.prevent="item.resetWarning()">
+                  <i class="bi bi-exclamation-triangle fs-2"></i>
+                </a>
+              </template>
+              
+            <button class="btn btn-outline-primary btn-lg my-2" @click="showLocoControllerPopup(item, $event)">
+              {{ item.label }}
+               <i v-if="item.route.path" class="bi bi-signpost"></i>
+              <i v-if="!item.hasPosition()" class="bi bi-question"></i>
+            </button>
             
-            <div class="d-flex flex-row justify-content-center">
+            <div class="d-flex flex-row justify-content-center align-items-center">
             
               <template v-if=" item.speed>0">
                 <a href="#" class="text-decoration-underline" @click.prevent="updateSpeedDirection(item,undefined,item.direction===1?0:1)">
                   <i v-if="item.direction===1" class="bi bi-arrow-up"></i>
                   <i v-if="item.direction===0" class="bi bi-arrow-down"></i>
                 </a>
-                {{ item.adjustedSpeed || 0 }} / {{ item.speed || 0 }}
+                <span class="fs-3">{{ item.adjustedSpeed || 0 }}</span><sup class="">/{{ item.speed || 0 }}</sup>
                 <a href="#" class="ms-2 text-danger text-decoration-underline" @click.prevent="stopLoco(item)">
                   <i class="bi bi-sign-stop"></i>
                 </a>
@@ -58,10 +70,12 @@
                 </a>
               </template>
             </div>
+            <!--
             <div class="d-flex flex-row justify-content-center">
               <i v-if="item.route.path" class="bi bi-signpost"></i>
               <i v-if="!item.hasPosition()" class="bi bi-question"></i>
             </div>
+            -->
           </div>
         </div>
         
@@ -134,9 +148,10 @@
                 </div>
                 <div class="">
                     <input type="range" min="0" max="125" v-model="state.selectedLoco.speed" 
-                    id="simpleRange" :disabled="!state.selectedLoco"  @change="updateSpeedDirection(state.selectedLoco)">
+                    id="simpleRange" :disabled="!state.selectedLoco"  @change="updateSpeedDirection(state.selectedLoco)"
+                    style="width: 32px; height: 260px;"/>
 
-                    <div class="value-display" id="rangeValue" >{{state.selectedLoco.speed}}</div>
+                    <div class="value-display fs-3" id="rangeValue">{{state.selectedLoco.speed}}</div>
                 </div>
                 <button class="btn btn-sm btn-outline-danger" @click="stopLoco(state.selectedLoco)">Stop</button>
                 <div class="d-flex flex-row">
@@ -232,12 +247,17 @@
           </div>
         </div>
       -->
-        <div v-if="state.matchLocoModal.show" class="modal fade show d-block" tabindex="-1" style="background:rgba(0,0,0,0.5);">
+        <div v-if="state.matchLocoModal.show && state.matchLocoModal.pins.length" class="modal fade show d-block" tabindex="-1" style="background:rgba(0,0,0,0.5);">
           <div class="modal-dialog">
             <div class="modal-content">
               <div class="modal-header">
-                <h5 class="modal-title">Assign a Loco to Block {{ state.matchLocoModal.pin }}</h5>
-                <button type="button" class="btn-close" @click="state.matchLocoModal.show = false"></button>
+                <h5 class="modal-title">
+                  Assign a Loco to Block {{ state.matchLocoModal.pins[0] }}
+                  <span v-if="state.matchLocoModal.pins.length > 1" class="badge bg-secondary ms-2">
+                    {{ state.matchLocoModal.pins.length }} unresolved
+                  </span>
+                </h5>
+                <button type="button" class="btn-close" @click="state.matchLocoModal.show = false; state.matchLocoModal.pins = []"></button>
               </div>
               <div class="modal-body">
                 <ul class="list-group mb-3">
@@ -246,8 +266,12 @@
                     :key="loco.id"
                     class="list-group-item d-flex justify-content-between align-items-center"
                   >
-                    <button class="btn btn-outline-primary btn-sm flex-grow-1 text-start"
-                      @click="onLocationEntered(loco, [state.matchLocoModal.pin]); state.matchLocoModal.show = false;">
+                    <button class="btn btn-lg btn-primary  flex-grow-1 text-start"
+                      @click="
+                        onLocationEntered(loco, [state.matchLocoModal.pins[0]]);
+                        state.matchLocoModal.pins.shift();
+                        if (state.matchLocoModal.pins.length === 0) state.matchLocoModal.show = false;
+                      ">
                       {{ loco.label }}
                       <span v-if="loco.hasPosition()" class="text-muted small">
                         (currently at {{ loco.trainPosition?.startBlockId }})
@@ -255,7 +279,10 @@
                     </button>
                   </li>
                 </ul>
-                <button class="btn btn-secondary w-100" @click="state.matchLocoModal.show = false">Cancel</button>
+                <button class="btn btn-secondary w-100"
+                  @click="state.matchLocoModal.show = false; state.matchLocoModal.pins = []">
+                  Cancel (clear all)
+                </button>
               </div>
             </div>
           </div>
@@ -294,26 +321,27 @@
           <div class="tab-content mt-3 h-100" id="myTabContent">
             
               <div class="tab-pane fade show active" id="tab1" role="tabpanel" aria-labelledby="tab1-tab">
-                <div class="btn-group m-1" role="group" aria-label="Basic radio toggle button group">
+                <div class="btn-group m-2" role="group" aria-label="Basic radio toggle button group">
                   <input type="radio" class="btn-check" name="btnradio" id="btnradio1" autocomplete="off"
-                  v-model="state.selectedLoco.direction" 
-                  :value="0"
-                  :disabled="!state.selectedLoco" @change="updateSpeedDirection(state.selectedLoco)">
-                  <label class="btn btn-outline-primary p-1 px-2" for="btnradio1">&lt;</label>
+                    v-model="state.selectedLoco.direction" 
+                    :value="0"
+                    :disabled="!state.selectedLoco" @change="updateSpeedDirection(state.selectedLoco)">
+                  <label class="btn btn-lg btn-outline-primary p-2 px-4 fs-4" for="btnradio1">&lt;</label>
 
                   <input type="radio" class="btn-check" name="btnradio" id="btnradio2" autocomplete="off" 
-                  v-model="state.selectedLoco.direction" 
-                  :value="1"
-                  :disabled="!state.selectedLoco" @change="updateSpeedDirection(state.selectedLoco)">
-                  <label class="btn btn-outline-primary p-1 px-2" for="btnradio2">&gt;</label>
+                    v-model="state.selectedLoco.direction" 
+                    :value="1"
+                    :disabled="!state.selectedLoco" @change="updateSpeedDirection(state.selectedLoco)">
+                  <label class="btn btn-lg btn-outline-primary p-2 px-4 fs-4" for="btnradio2">&gt;</label>
                 </div>
                 <div class="">
                     <input type="range" min="0" max="125" v-model="state.selectedLoco.speed" 
-                    id="simpleRange" :disabled="!state.selectedLoco"  @change="updateSpeedDirection(state.selectedLoco)">
+                    id="simpleRange" :disabled="!state.selectedLoco"  @change="updateSpeedDirection(state.selectedLoco)"
+                    style="width: 96px; height: 260px;"/>
 
-                    <div class="value-display" id="rangeValue" >{{state.selectedLoco.speed}}</div>
+                    <div class="value-display fs-3" id="rangeValue">{{state.selectedLoco.speed}}</div>
                 </div>
-                <button class="btn btn-sm btn-outline-danger" @click="stopLoco(state.selectedLoco)">Stop</button>
+                <button class="btn btn-lg btn-outline-danger" @click="stopLoco(state.selectedLoco)">Stop</button>
                 
                 
               </div>
@@ -399,7 +427,7 @@
                   </tbody>
                 </table>
 
-                <button class="btn btn-sm btn-text-primary" @click="state.selectedLoco.clearBlockHistory()">Clear</button>
+                <button class="btn btn-sm btn-primary" @click="state.selectedLoco.clearBlockHistory()">Clear</button>
            
                 </div>
               </div>
@@ -437,7 +465,7 @@ export default {
         isAllowSpeedOverride:false,
         matchLocoModal: {
           show: false,
-          pin: null
+          pins: []
         },
         locoControllerPopup: {
           show: false,
@@ -624,7 +652,7 @@ export default {
                     if (!marker) {
                         marker = document.createElementNS("http://www.w3.org/2000/svg", "circle");
                         marker.setAttribute("id", `loco-${loco.id}-carriage-${markerIndex}`);
-                        marker.setAttribute("r", "8");
+                        marker.setAttribute("r", "4");
                         marker.setAttribute("fill", loco.color || "blue");
                         svg.appendChild(marker);
                     }
@@ -729,7 +757,7 @@ export default {
         //const isOccupied=me.state.roster.reduce((a,d)=>a || d.isOccupyingBlock(blockId), false);
        const loco = me.layout.isBlockOccupied(blockId);
 
-        SvgUtils.setLineStoke(element, loco?6:4, loco?(loco.color || "grey"):"green");
+        SvgUtils.setLineStoke(element, loco?4:4, loco?(loco.color || "grey"):"green");
       } 
     },
     refreshBlocks() {
@@ -870,14 +898,27 @@ export default {
 
 
    input[type="range"] {
-            writing-mode: vertical-lr; 
-            direction: rtl;
-            width: 12px; /* Width of the slider */
-            height: 200px; /* Height of the slider */
-            background: #ddd;
-            border-radius: 5px;
-            outline: none;
-        }
+      writing-mode: vertical-lr; 
+      direction: rtl;
+      width: 20px; /* Width of the slider */
+      
+      background: #ddd;
+      border-radius: 8px;
+      
+    }
+    
+    input[type="range"]::-moz-range-track {
+      height: 20px;           /* Thicker track for Firefox */
+      background: #ddd;
+      border-radius: 8px;
+    }
+
+    input[type="range"]::-ms-fill-lower,
+    input[type="range"]::-ms-fill-upper {
+      height: 20px;           /* Thicker track for IE/Edge */
+      background: #ddd;
+      border-radius: 8px;
+    }
 /*
         input[type="range"]::-webkit-slider-thumb {
             -webkit-appearance: none;

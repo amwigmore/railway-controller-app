@@ -20,8 +20,11 @@ class Loco {
         this.lastLocoSpeed = 0; // last speed sent to DCC
         this.lastUpdateTime = Date.now(); // timestamp in ms
         this.blockHistory = []; // [{blockId: "B12", time: 1680000000000}]
+        this.warning = null;
     }
-
+    resetWarning() {
+        this.warning = null;
+    }
     stop() {
         this.speed = 0;
         this.adjustedSpeed = 0;
@@ -167,9 +170,13 @@ class Loco {
         if (!this.layout.state.isConnected) return;
 
         const speed = this.adjustedSpeed ;
-        if (speed === this.lastLocoSpeed) return;
+        if (speed === this.lastLocoSpeed && 
+            this.direction === this.lastLocoDirection  
+                ) return;
 
+        this.lastLocoDirection = this.direction;
         this.lastLocoSpeed = speed;
+        
         window.electronAPI.setCabSpeed(this.id, speed, this.direction)
             .then(response => {
                 this.layout.addSerialOutput(`Cab Speed Response: ${response}`);
@@ -214,7 +221,12 @@ class Loco {
         const blockLength = block.length || 10;
         const offset = this.trainPosition.startOffset;
 
-        const { adjustedSpeed, reason } = this.getAdjustedSpeed(offset, blockLength);
+
+        let { adjustedSpeed, reason } = this.getAdjustedSpeed(offset, blockLength);
+        if (this.layout.state.isAllowSpeedOverride) {
+            adjustedSpeed = this.speed;
+        }
+
 
         if (adjustedSpeed === 0 && this.speed > 0) {
            
@@ -225,6 +237,7 @@ class Loco {
                 ? Math.min(offset, blockLength - margin)
                 : Math.max(offset, margin);
             */
+            this.warning = reason || 'Speed adjusted to 0';
             this.stop(); // sets this.speed = 0 and sends DCC
             this.layout.addLogEntry("loco", `Loco ${this.label} stopped due to: ${reason}`);
             //this.layout.broadcastLocoException?.(this, reason);
@@ -232,7 +245,10 @@ class Loco {
         }
 
         const distanceToMove = this.getSpeedInPixelsPerSecond(adjustedSpeed) * elapsedSeconds;
+       
         this.adjustedSpeed = adjustedSpeed; // Store adjusted speed for later use
+        
+
         this.updateSpeedDirection(); // Send DCC command
         if (this.direction === 1) { // forward
             this.trainPosition.startOffset += distanceToMove;

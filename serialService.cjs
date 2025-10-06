@@ -61,7 +61,9 @@ class SerialService {
   }
   log(message) {
     console.log("SerialService Log:", message);
-    callback('on-log', message)
+    
+    this.listeners.forEach((callback) => callback('on-log', message));
+    
   }
   // ✅ Handle response and match by opcode
   handleResponse(response) {
