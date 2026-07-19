@@ -21,6 +21,12 @@ class Loco {
         this.lastUpdateTime = Date.now(); // timestamp in ms
         this.blockHistory = []; // [{blockId: "B12", time: 1680000000000}]
         this.warning = null;
+        
+        // Per-loco calibration tracking
+        this.blockCalibration = {}; // {blockId: {measurements: [...], avg: X, stdDev: Y}}
+        this._lastConfirmedBlock = null; // Track last confirmed block entry
+        this._lastConfirmedTime = null;
+        this.deadReckoningAdjustments = []; // Track when position is adjusted
     }
     resetWarning() {
         this.warning = null;
@@ -195,7 +201,6 @@ class Loco {
         const elapsedSeconds = (now - this.lastUpdateTime) / 1000;
         this.lastUpdateTime = now;
 
-       
         const blockLookup = this.layout.state.blockLookup;
         const block = blockLookup[this.trainPosition.startBlockId];
 
@@ -203,62 +208,48 @@ class Loco {
 
         if (!block && !this.layout.state.isAllowSpeedOverride) {
             this.layout.addLogEntry("loco", `Train ${this.label} has no block.`);
-            this.stop(); // Stop if no block found
+            this.stop();
             return;
         }
 
         if (!block) {
-            // If no block, we can still move if speed override is allowed
             if (this.layout.state.isAllowSpeedOverride) {
                 this.adjustedSpeed = this.speed;
                 this.updateSpeedDirection();
                 return;
             }
- 
         }
-        
 
-        const blockLength = block.length || 10;
+        // 🔥 ALWAYS read blockLength fresh from block reference
+        // This ensures we use calibrated lengths immediately after calibration updates
+        const blockLength = block?.length || 10;
         const offset = this.trainPosition.startOffset;
-
 
         let { adjustedSpeed, reason } = this.getAdjustedSpeed(offset, blockLength);
         if (this.layout.state.isAllowSpeedOverride) {
             adjustedSpeed = this.speed;
         }
 
-
         if (adjustedSpeed === 0 && this.speed > 0) {
-           
-            //why did we change the offset in this cas?
-            /*
-            const margin = 100; // pixels before point/edge
-            this.trainPosition.startOffset = this.direction === 1
-                ? Math.min(offset, blockLength - margin)
-                : Math.max(offset, margin);
-            */
             this.warning = reason || 'Speed adjusted to 0';
-            this.stop(); // sets this.speed = 0 and sends DCC
+            this.stop();
             this.layout.addLogEntry("loco", `Loco ${this.label} stopped due to: ${reason}`);
-            //this.layout.broadcastLocoException?.(this, reason);
             return;
         }
 
+        // 🔥 DEAD RECKONING: Calculate position based on speed and elapsed time
         const distanceToMove = this.getSpeedInPixelsPerSecond(adjustedSpeed) * elapsedSeconds;
-       
-        this.adjustedSpeed = adjustedSpeed; // Store adjusted speed for later use
+        this.adjustedSpeed = adjustedSpeed;
         
-
-        this.updateSpeedDirection(); // Send DCC command
         if (this.direction === 1) { // forward
             this.trainPosition.startOffset += distanceToMove;
 
             if (this.trainPosition.startOffset >= blockLength) {
                 // Reached end of block
-                const nextBlockId = this.layout.getActiveForwardConnection(block)
+                const nextBlockId = this.layout.getActiveForwardConnection(block);
                 if (nextBlockId) {
                     this.trainPosition.startBlockId = nextBlockId;
-                    this.trainPosition.startOffset = 0;
+                    this.trainPosition.startOffset = this.trainPosition.startOffset - blockLength;
                 } else {
                     // No next block
                     this.trainPosition.startOffset = blockLength;
@@ -275,9 +266,10 @@ class Loco {
                 const prevBlockId = this.layout.getActiveBackwardConnection(block);
 
                 if (prevBlockId) {
-                    this.trainPosition.startBlockId = prevBlockId;
                     const prevBlock = blockLookup[prevBlockId];
-                    this.trainPosition.startOffset = prevBlock ? (prevBlock.length || 10) : 0;
+                    const prevBlockLength = prevBlock ? (prevBlock.length || 10) : 0;
+                    this.trainPosition.startBlockId = prevBlockId;
+                    this.trainPosition.startOffset = prevBlockLength + this.trainPosition.startOffset;
                 } else {
                     // No previous block
                     this.trainPosition.startOffset = 0;
@@ -287,9 +279,9 @@ class Loco {
             }
         }
 
-        this.updateTrainPositionFromHead(); // Update end position based on head position
+        this.updateSpeedDirection();
+        this.updateTrainPositionFromHead();
     }
-
     updateTrainPositionFromHead() {
         const blockLookup = this.layout.state.blockLookup;
         let remainingLength = this.length;
@@ -380,6 +372,34 @@ class Loco {
             this.route.end = this.route.start;
             this.route.start = temp;
             this.route.path = this.layout.findShortestPath(this.route.start, this.route.end);
+        }
+    }
+
+    getNextBlock() {
+        // Get the next block based on current position and direction
+        if (!this.trainPosition?.startBlockId) return null;
+        
+        const currentBlockId = this.trainPosition.startBlockId;
+        const block = this.layout.state.blockLookup[currentBlockId];
+        if (!block) return null;
+        
+        // Use the layout's methods to get the active connection based on point state
+        if (this.direction === 1) {
+            // Forward direction
+            if (!block.forward.pointId) {
+                // No point controls this, take the first connection
+                return block.forward.connections[0];
+            }
+            // Use layout method to get correct connection based on point state
+            return this.layout.getActiveForwardConnection(block);
+        } else {
+            // Backward direction
+            if (!block.backward.pointId) {
+                // No point controls this, take the first connection
+                return block.backward.connections[0];
+            }
+            // Use layout method to get correct connection based on point state
+            return this.layout.getActiveBackwardConnection(block);
         }
     }
 
@@ -533,9 +553,6 @@ class Loco {
       }
       
     blockLocationChanged(blockId, state) {
-
-
-
         if (state === 1) {
             if (this._debounceTimers[blockId]) {
                 clearTimeout(this._debounceTimers[blockId]);
@@ -543,22 +560,63 @@ class Loco {
             }
 
             const now = Date.now();
-             // Handle implicit exit from previous block
+            
+            // Check if we're getting a re-entry signal (train still in same block)
+            if (this.trainPosition.startBlockId === blockId && this._lastConfirmedBlock === blockId && this._lastConfirmedTime) {
+                const timeSinceLastEntry = (now - this._lastConfirmedTime) / 1000; // seconds
+                const calibratedLength = this.getCalibrationForBlock(blockId);
+                const currentLength = this.layout.state.blockLookup[blockId]?.length || 10;
+                
+                // If we're getting stuck in same block, adjust position using calibration
+                if (timeSinceLastEntry > 1 && calibratedLength > 0) {
+                    const distanceTraveled = this.getSpeedInPixelsPerSecond(this.adjustedSpeed) * timeSinceLastEntry;
+                    const newOffset = this.direction === 1 
+                        ? Math.min(this.trainPosition.startOffset + distanceTraveled, calibratedLength)
+                        : Math.max(this.trainPosition.startOffset - distanceTraveled, 0);
+                    
+                    const oldOffset = this.trainPosition.startOffset;
+                    this.trainPosition.startOffset = newOffset;
+                    
+                    // Track this adjustment for UI visualization
+                    this.deadReckoningAdjustments.push({
+                        blockId,
+                        timestamp: now,
+                        oldOffset: oldOffset.toFixed(1),
+                        newOffset: newOffset.toFixed(1),
+                        distanceTraveled: distanceTraveled.toFixed(1),
+                        calibratedLength: calibratedLength.toFixed(1),
+                        timeSinceLastEntry: timeSinceLastEntry.toFixed(2),
+                        reason: 'Re-entry signal received - dead reckoning adjustment'
+                    });
+                    
+                    // Keep only last 5 adjustments
+                    if (this.deadReckoningAdjustments.length > 5) {
+                        this.deadReckoningAdjustments.shift();
+                    }
+                    
+                    this.layout.addLogEntry("loco", `🔄 ${this.label}: Sensor re-triggered in ${blockId}, dead reckoning adjusted offset from ${oldOffset.toFixed(1)}px → ${newOffset.toFixed(1)}px (traveled ${distanceTraveled.toFixed(1)}px in ${timeSinceLastEntry.toFixed(1)}s using calibrated block length ${calibratedLength}px)`);
+                }
+            }
+            
+            // Handle implicit exit from previous block
             const lastEntry = [...this.blockHistory].reverse().find(e => e.action === 'enter' && !e.exitTime);
             if (lastEntry && lastEntry.blockId !== blockId) {
                 lastEntry.exitTime = now;
                 lastEntry.duration = (now - lastEntry.time) / 1000;
                 lastEntry.exitSpeed = this.adjustedSpeed ?? 0;
 
-                const lastBlockLength = this.layout.state.blockLookup[lastEntry.blockId]?.length || 0
-                lastEntry.speed = lastBlockLength / lastEntry.duration;
-                /*
-                this.blockHistory.push({
-                    blockId: lastEntry.blockId,
-                    action: 'exit',
-                    time: now
-                });
-                */
+                const lastBlock = this.layout.state.blockLookup[lastEntry.blockId];
+                const declaredLength = lastBlock?.length || 10;
+                if (declaredLength > 0 && lastEntry.duration > 0) {
+                    lastEntry.speed = declaredLength / lastEntry.duration;
+                    
+                    // Record per-loco calibration data
+                    // isStable=false because we don't have exit/entry speed info here
+                    this.recordBlockMeasurement(lastEntry.blockId, declaredLength, lastEntry.duration, this.adjustedSpeed ?? 0, false);
+                    
+                    // Also calibrate global segment length
+                    this.calibrateSegmentLength(lastEntry.blockId, lastEntry.duration, this.adjustedSpeed ?? 0);
+                }
             }
 
             // Only add a new entry if it's a new block
@@ -568,30 +626,36 @@ class Loco {
                     blockId,
                     action: 'enter',
                     time: now,
-                    entrySpeed:  this.adjustedSpeed ?? 0,
-                    //speed: this.adjustedSpeed ?? 0
+                    entrySpeed: this.adjustedSpeed ?? 0,
                 });
             }
-          
-        
-            // 🔥 NEW: Anchor the head position
 
-            const blockLength = this.layout.state.blockLookup[blockId]?.length || 10;
+            // 🔥 Use calibrated length for more accurate dead reckoning positioning
+            const calibratedLength = this.getCalibrationForBlock(blockId);
+            const blockLength = calibratedLength > 0 ? calibratedLength : (this.layout.state.blockLookup[blockId]?.length || 10);
+            const declaredLength = this.layout.state.blockLookup[blockId]?.length || 10;
+            if (calibratedLength > 0 && Math.abs(calibratedLength - declaredLength) > 5) {
+                this.layout.addLogEntry("loco", `${this.label} entering block ${blockId}: using calibrated ${calibratedLength.toFixed(0)}px (declared: ${declaredLength}px)`, true);
+            }
             let offset = 0;
+            
             if (!this.trainPosition.startBlockId) {
-                offset = blockLength / 2; // Center in block if no start position
+                // First time getting position - center in block
+                offset = blockLength / 2;
             } else if (this.direction === 1) {
-                offset = 0; // Forward → enters at start
-            }   else {  
-                offset = blockLength; // Backward → enters at end
+                // Forward direction - enters at start of block
+                offset = 0;
+            } else {
+                // Backward direction - enters at end of block
+                offset = blockLength;
             }
 
-
             this.trainPosition.startBlockId = blockId;
-            
             this.trainPosition.startOffset = offset;
-        
-            this.lastUpdateTime = Date.now();  // reset dead reckoning timer
+            this.lastUpdateTime = Date.now();
+            this._lastBlockId = blockId;
+            this._lastConfirmedBlock = blockId;
+            this._lastConfirmedTime = now;
         } else {
             if (this._debounceTimers[blockId]) {
                 clearTimeout(this._debounceTimers[blockId]);
@@ -601,7 +665,6 @@ class Loco {
                 const exitTime = Date.now();
     
                 // Find the matching entry record
-                /*
                 const lastEntryIndex = [...this.blockHistory].reverse().findIndex(
                     (e) => e.blockId === blockId && e.action === "enter"
                 );
@@ -610,8 +673,25 @@ class Loco {
                 if (actualIndex >= 0) {
                     const entry = this.blockHistory[actualIndex];
                     entry.exitTime = exitTime;
-                    entry.duration = (exitTime - entry.time) / 1000; // seconds
+                    entry.duration = (exitTime - entry.time) / 1000;
                     entry.exitSpeed = this.adjustedSpeed ?? 0;
+                    
+                    // Record per-loco calibration
+                    const block = this.layout.state.blockLookup[blockId];
+                    if (block && entry.duration > 0) {
+                        entry.speed = block.length / entry.duration;
+                        
+                        // Check if speed was constant throughout the block
+                        const speedDiff = Math.abs(entry.exitSpeed - entry.entrySpeed);
+                        const avgSpeed = (entry.entrySpeed + entry.exitSpeed) / 2;
+                        const speedVariation = avgSpeed > 0 ? (speedDiff / avgSpeed) * 100 : 0;
+                        
+                        // Always record measurement, but mark quality
+                        // Prefer stable measurements (< 20% variation) for calibration
+                        const isStable = speedVariation < 20;
+                        this.recordBlockMeasurement(blockId, block.length, entry.duration, entry.entrySpeed, isStable);
+                        this.calibrateSegmentLength(blockId, entry.duration, entry.entrySpeed);
+                    }
                 }
     
                 this.blockHistory.push({
@@ -619,11 +699,256 @@ class Loco {
                     action: "exit",
                     time: exitTime
                 });
-                */
-                delete this._debounceTimers[blockId];
-            }, 1000);
+                
+                if (this._lastConfirmedBlock === blockId) {
+                    this._lastConfirmedBlock = null;
+                    this._lastConfirmedTime = null;
+                }
+            }, 500); // 500ms debounce for exit events
         }
     }
+
+    recordBlockMeasurement(blockId, declaredLength, durationSeconds, speed, isStable = true) {
+        if (!this.blockCalibration[blockId]) {
+            this.blockCalibration[blockId] = {
+                measurements: [],
+                avg: 0,
+                stdDev: 0,
+                count: 0
+            };
+        }
+
+        const cal = this.blockCalibration[blockId];
+        const measuredLength = speed * durationSeconds;
+        const stabilityMarker = isStable ? '✓' : '?';
+
+        // Only record if measurement is reasonable (0.3x to 3x declared length)
+        if (measuredLength > declaredLength * 0.3 && measuredLength < declaredLength * 3) {
+            cal.measurements.push({
+                measured: measuredLength,
+                declared: declaredLength,
+                duration: durationSeconds,
+                speed: speed,
+                stable: isStable,
+                timestamp: Date.now()
+            });
+            this.layout.addLogEntry("loco", `${stabilityMarker} ${this.label} measured block ${blockId}: ${measuredLength.toFixed(0)}px (declared: ${declaredLength}px, count: ${cal.measurements.length})`, true);
+
+            // Keep last 20 measurements per block
+            if (cal.measurements.length > 20) {
+                cal.measurements.shift();
+            }
+
+            this.updateBlockCalibrationStats(blockId);
+        }
+    }
+
+    updateBlockCalibrationStats(blockId) {
+        const cal = this.blockCalibration[blockId];
+        if (cal.measurements.length === 0) return;
+
+        // Calculate average
+        const sum = cal.measurements.reduce((a, m) => a + m.measured, 0);
+        cal.avg = sum / cal.measurements.length;
+        cal.count = cal.measurements.length;
+
+        // Calculate standard deviation
+        const variance = cal.measurements.reduce((a, m) => a + Math.pow(m.measured - cal.avg, 2), 0) / cal.measurements.length;
+        cal.stdDev = Math.sqrt(variance);
+        
+        // Count stable measurements (speed didn't vary much)
+        const stableMeasurements = cal.measurements.filter(m => m.stable ?? true).length;
+        
+        // If we have good consistency and either:
+        // - 2+ stable measurements with stdDev < 20%, OR
+        // - 4+ any measurements with stdDev < 20%
+        // Then update the actual block length for better dead reckoning
+        const hasGoodStableData = stableMeasurements >= 2 && cal.stdDev < cal.avg * 0.2;
+        const hasGoodAnyData = cal.count >= 4 && cal.stdDev < cal.avg * 0.2;
+        
+        if (hasGoodStableData || hasGoodAnyData) {
+            const blockInfo = this.layout.state.blockLookup[blockId];
+            if (blockInfo) {
+                const oldLength = blockInfo.length;
+                blockInfo.length = Math.round(cal.avg);
+                // Only log if significant change
+                if (Math.abs(blockInfo.length - oldLength) > 5) {
+                    this.layout.addLogEntry("loco", `✓ ${this.label}: Calibrated block ${blockId}: ${oldLength}px → ${blockInfo.length}px (based on ${cal.count} measurements, stability: ${(stableMeasurements)}/${cal.count})`, false);
+                } else {
+                    this.layout.addLogEntry("loco", `ℹ ${this.label}: Block ${blockId} already accurate (${blockInfo.length}px)`, true);
+                }
+            }
+        }
+    }
+
+    getCalibrationForBlock(blockId) {
+        const cal = this.blockCalibration[blockId];
+        if (!cal || cal.count < 2) return 0; // Need at least 2 measurements
+        
+        // Return average if consistency is good (stdDev < 20% of average)
+        if (cal.stdDev < cal.avg * 0.2) {
+            return cal.avg;
+        }
+        return 0; // Not consistent enough
+    }
+
+    getBlockCalibrationStats(blockId) {
+        const cal = this.blockCalibration[blockId];
+        if (!cal) return null;
+        
+        return {
+            blockId,
+            count: cal.count,
+            avgMeasured: cal.avg.toFixed(1),
+            stdDev: cal.stdDev.toFixed(1),
+            consistency: ((1 - cal.stdDev / cal.avg) * 100).toFixed(1) + '%',
+            recentMeasurements: cal.measurements.slice(-5).map(m => ({
+                measured: m.measured.toFixed(1),
+                declared: m.declared,
+                speed: m.speed.toFixed(1)
+            }))
+        };
+    }
+
+    getAllCalibrationData() {
+        // Return all calibration data for this loco
+        const data = {
+            locoId: this.id,
+            locoLabel: this.label,
+            timestamp: Date.now(),
+            blocks: {}
+        };
+
+        Object.entries(this.blockCalibration).forEach(([blockId, cal]) => {
+            data.blocks[blockId] = {
+                blockId,
+                count: cal.count,
+                avgMeasured: parseFloat(cal.avg.toFixed(1)),
+                stdDev: parseFloat(cal.stdDev.toFixed(1)),
+                consistency: parseFloat(((1 - cal.stdDev / cal.avg) * 100).toFixed(1)),
+                measurements: cal.measurements.map(m => ({
+                    measured: parseFloat(m.measured.toFixed(1)),
+                    declared: m.declared,
+                    speed: parseFloat(m.speed.toFixed(1)),
+                    duration: parseFloat(m.duration.toFixed(3)),
+                    ratio: parseFloat((m.measured / m.declared).toFixed(3))
+                }))
+            };
+        });
+
+        return data;
+    }
+
+    analyzeSpeedLinearity(blockId) {
+        // Analyze if measured length is linear with speed
+        const cal = this.blockCalibration[blockId];
+        if (!cal || !cal.measurements || cal.measurements.length < 3) return null;
+
+        const measurements = cal.measurements;
+        
+        // Filter valid measurements (must have speed property)
+        const validMeasurements = measurements.filter(m => 
+            m && typeof m === 'object' && 
+            typeof m.speed === 'number' && 
+            typeof m.measured === 'number'
+        );
+        
+        if (validMeasurements.length < 3) return null;
+        
+        // Sort by speed
+        const sorted = [...validMeasurements].sort((a, b) => a.speed - b.speed);
+        
+        // Calculate correlation between speed and measured length
+        const avgSpeed = validMeasurements.reduce((a, m) => a + m.speed, 0) / validMeasurements.length;
+        const avgMeasured = validMeasurements.reduce((a, m) => a + m.measured, 0) / validMeasurements.length;
+        
+        let correlation = 0;
+        let speedVariance = 0;
+        let measuredVariance = 0;
+        
+        validMeasurements.forEach(m => {
+            const speedDiff = m.speed - avgSpeed;
+            const measuredDiff = m.measured - avgMeasured;
+            correlation += speedDiff * measuredDiff;
+            speedVariance += speedDiff * speedDiff;
+            measuredVariance += measuredDiff * measuredDiff;
+        });
+        
+        const denominator = Math.sqrt(speedVariance * measuredVariance);
+        correlation = denominator > 0 ? correlation / denominator : 0;
+        
+        return {
+            blockId,
+            sampleCount: validMeasurements.length,
+            speedRange: {
+                min: parseFloat(sorted[0].speed.toFixed(1)),
+                max: parseFloat(sorted[sorted.length - 1].speed.toFixed(1))
+            },
+            measuredRange: {
+                min: parseFloat(sorted.reduce((a, m) => a < m.measured ? a : m.measured, Infinity).toFixed(1)),
+                max: parseFloat(sorted.reduce((a, m) => a > m.measured ? a : m.measured, -Infinity).toFixed(1))
+            },
+            correlation: parseFloat(correlation.toFixed(3)), // -1 to 1, closer to 0 = more linear
+            isLinear: Math.abs(correlation) < 0.3 // If correlation is low, relationship is closer to linear
+        };
+    }
+
+    exportCalibrationForComparison() {
+        // Export data in format suitable for cross-loco comparison
+        const comparison = {
+            locoId: this.id,
+            locoLabel: this.label,
+            blockSummaries: []
+        };
+
+        Object.entries(this.blockCalibration).forEach(([blockId, cal]) => {
+            // Check for valid calibration data
+            if (!cal || !cal.count || cal.count < 2) return;
+            
+            const linearity = this.analyzeSpeedLinearity(blockId);
+            
+            // Only include if we have valid avg data
+            if (typeof cal.avg !== 'number' || cal.avg <= 0) return;
+            
+            comparison.blockSummaries.push({
+                blockId,
+                count: cal.count,
+                avgMeasured: parseFloat(cal.avg.toFixed(1)),
+                stdDev: parseFloat((cal.stdDev || 0).toFixed(1)),
+                consistency: parseFloat(((1 - (cal.stdDev || 0) / cal.avg) * 100).toFixed(1)),
+                linearity: linearity?.isLinear || false,
+                speedRange: linearity?.speedRange || {}
+            });
+        });
+
+        return comparison;
+    }
+
+    calibrateSegmentLength(blockId, durationSeconds, speed) {
+        if (durationSeconds < 0.1 || speed === 0) return; // Invalid data
+        
+        const block = this.layout.state.blockLookup[blockId];
+        if (!block) return;
+
+        const measuredLength = (speed * durationSeconds);
+        const currentLength = block.length || 10;
+
+        // Only calibrate if measurement is within reasonable bounds (0.5x to 2x current)
+        if (measuredLength > currentLength * 0.5 && measuredLength < currentLength * 2) {
+            // Average with current length to smooth out variations
+            const newLength = (currentLength + measuredLength) / 2;
+            const change = Math.abs(newLength - currentLength);
+            
+            if (change > 5) { // Only save if significant change
+                block.length = Math.round(newLength);
+                this.layout.addLogEntry("loco", `Calibrated ${blockId}: ${currentLength}px → ${block.length}px`);
+                
+                // Save calibrated lengths to localStorage
+                this.layout.saveSegmentCalibration();
+            }
+        }
+    }
+
     /*
     handleBlockLocationChanged() {
         this.trainPosition.startBlockId = this.locations[0];
@@ -658,7 +983,7 @@ class Loco {
             if (locoSpeedChanged) this.updateSpeedDirection();
         }, 2000);
     }
-        */
+    */
 }
 
 export default Loco;

@@ -207,10 +207,20 @@ class SerialService {
     return this.sendCommand('<Q>', 'Q');
   }
 
-  // ✅ Set Turnout State
+  // ✅ Set Turnout State (fire-and-forget, no response expected)
   async setTurnoutState(turnoutId, throwState) {
     if (![0, 1].includes(throwState)) throw new Error('Throw state must be 0 (close) or 1 (throw)');
-    return this.sendCommand(`<T ${turnoutId} ${throwState}>`, 'H');
+    return new Promise((resolve, reject) => {
+      this.log("Sending Command: " + `<T ${turnoutId} ${throwState}>`);
+      this.port.write(`<T ${turnoutId} ${throwState}>\n`, (err) => {
+        if (err) {
+          reject(`Error sending command: ${err.message}`);
+        } else {
+          // Resolve immediately without waiting for response
+          resolve({ success: true });
+        }
+      });
+    });
   }
 
   // ✅ Process general responses like pin changes

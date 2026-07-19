@@ -10,7 +10,9 @@ let serial;
 
 // helper: set window to the current work area (respects LXDE panel)
 function fitToWorkArea(win) {
+
   if (!win) return;
+  console.log("Fitting window to work area");
   const { workArea } = screen.getPrimaryDisplay(); // {x,y,width,height}
   win.setBounds(workArea); // avoids covering the panel
 }
@@ -41,7 +43,7 @@ function createWindow() {
   });
 
   ipcMain.handle('is-serial-connected', async () => {
-    return await serial!=null && serial.isConnected();
+    return serial != null && serial.isConnected;
   });
 
   startSerialPortListener();
@@ -61,7 +63,11 @@ function createWindow() {
 }
 
 
-
+app.disableHardwareAcceleration();
+app.commandLine.appendSwitch('disable-gpu');
+app.commandLine.appendSwitch('disable-gpu-compositing');
+app.commandLine.appendSwitch('enable-logging');
+app.commandLine.appendSwitch('use-gl', 'swiftshader'); // software rasterizer
 
 
 app.whenReady().then(() => {
@@ -70,9 +76,9 @@ app.whenReady().then(() => {
   // keep the window sized correctly if resolution, rotation, or panel changes
   const refresh = () => fitToWorkArea(mainWindow);
   // these cover most changes on Raspberry Pi / LXDE
-  screen.on('display-metrics-changed', refresh);
+  /*screen.on('display-metrics-changed', refresh);
   screen.on('display-added', refresh);
-  screen.on('display-removed', refresh);
+  screen.on('display-removed', refresh);*/
 });
 
 app.on('activate', () => {

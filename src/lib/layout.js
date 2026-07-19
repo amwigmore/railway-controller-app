@@ -79,8 +79,27 @@ class Layout extends EventTarget {
     
   }
   postStartUp() {
+    // Load roster from localStorage first for immediate UI population
+    this.loadRosterFromLocalStorage();
+    // Restore calibration stats after roster is loaded
+    this.restoreLocoCalibrationStats();
+    // Then request updated roster from DCC (will merge/update existing locos)
     this.requestRoster();
     this.resetPoints();
+  }
+
+  loadRosterFromLocalStorage() {
+    try {
+      const savedRoster = localStorage.getItem('locoRoster');
+      if (savedRoster) {
+        const rosterData = JSON.parse(savedRoster);
+        this.state.roster = rosterData.map(data => new Loco(data, this));
+        console.log(`✓ Loaded ${this.state.roster.length} locos from localStorage`);
+      }
+    } catch (error) {
+      console.error('Error loading roster from localStorage:', error);
+      // Continue without cached roster, DCC will provide it
+    }
   }
 
   onPinChanged(pin, value) {
@@ -90,7 +109,7 @@ class Layout extends EventTarget {
         return;
       }
       if (blockInfo.value === value) return; // No change
-      this.addLogEntry("layout", `Block ${pin} changed to ${value}`);
+      this.addLogEntry("layout", `Block ${pin} changed to ${value}`, true); // Debug log
             
       pin = blockInfo.pin;
 
@@ -236,7 +255,75 @@ class Layout extends EventTarget {
         me.state.blockLookup=blockLookupMap;
         me.state.pointLookup=pointLookupMap;
 
+        // Load calibrated segment lengths from localStorage
+        this.loadSegmentCalibration();
+
         return elementLookup;
+    }
+
+    saveSegmentCalibration() {
+        const calibration = {};
+        Object.entries(this.state.blockLookup).forEach(([blockId, block]) => {
+            if (block.length !== undefined) {
+                calibration[blockId] = block.length;
+            }
+        });
+        localStorage.setItem('segmentCalibration', JSON.stringify(calibration));
+        this.addLogEntry("layout", "Segment calibration saved");
+    }
+
+    loadSegmentCalibration() {
+        try {
+            const saved = localStorage.getItem('segmentCalibration');
+            if (!saved) return;
+            
+            const calibration = JSON.parse(saved);
+            Object.entries(calibration).forEach(([blockId, length]) => {
+                const block = this.state.blockLookup[blockId];
+                if (block) {
+                    block.length = length;
+                }
+            });
+            this.addLogEntry("layout", "Segment calibration loaded");
+        } catch (error) {
+            this.addLogEntry("layout", `Error loading calibration: ${error.message}`);
+        }
+    }
+
+    saveLocoCalibrationStats() {
+        // Save detailed calibration stats for all locos
+        const calibrationData = {};
+        this.state.roster.forEach(loco => {
+            calibrationData[loco.id] = loco.blockCalibration;
+        });
+        localStorage.setItem('locoCalibrationStats', JSON.stringify(calibrationData));
+    }
+
+    restoreLocoCalibrationStats() {
+        // Restore calibration stats for locos after they're created
+        try {
+            const saved = localStorage.getItem('locoCalibrationStats');
+            if (!saved) return;
+            
+            const calibrationData = JSON.parse(saved);
+            this.state.roster.forEach(loco => {
+                if (calibrationData[loco.id]) {
+                    loco.blockCalibration = calibrationData[loco.id];
+                    // Re-apply calibrated lengths to blocks
+                    Object.entries(loco.blockCalibration).forEach(([blockId, cal]) => {
+                        if (cal.avg && cal.stdDev < cal.avg * 0.2) {
+                            const blockInfo = this.state.blockLookup[blockId];
+                            if (blockInfo) {
+                                blockInfo.length = Math.round(cal.avg);
+                            }
+                        }
+                    });
+                }
+            });
+            console.log('✓ Restored calibration stats for locos');
+        } catch (error) {
+            console.error('Error restoring calibration stats:', error);
+        }
     }
     parseSegment(segmentStr) {
         let [id, forwardData, backwardData, length, speedlimit] = segmentStr.split("|");
@@ -470,8 +557,51 @@ class Layout extends EventTarget {
 
     async requestRoster() {
         let me=this;
-        const response = await window.electronAPI.requestRoster();
-        this.state.roster = response.map(data => new Loco(data, this));
+        try {
+            const response = await window.electronAPI.requestRoster();
+            if (!response || response.length === 0) {
+                console.log('ℹ️ No roster data from DCC, keeping existing locos from localStorage');
+                return;
+            }
+
+            // Merge DCC roster with existing locos from localStorage
+            const dccLocos = response.map(data => new Loco(data, this));
+            const existingIds = new Set(me.state.roster.map(l => l.id));
+            
+            // Update existing locos with DCC data
+            dccLocos.forEach(dccLoco => {
+                const existingLoco = me.state.roster.find(l => l.id === dccLoco.id);
+                if (existingLoco) {
+                    // Update properties but preserve state (position, speed, adjustments, calibration)
+                    Object.assign(existingLoco, {
+                        label: dccLoco.label,
+                        address: dccLoco.address,
+                        speed: dccLoco.speed,
+                        direction: dccLoco.direction,
+                        route: dccLoco.route
+                    });
+                    console.log(`✓ Updated loco ${dccLoco.label} from DCC`);
+                } else {
+                    // New loco from DCC, add it
+                    me.state.roster.push(dccLoco);
+                    console.log(`✓ Added new loco ${dccLoco.label} from DCC`);
+                }
+            });
+
+            // Save updated roster to localStorage for next startup
+            const rosterToSave = me.state.roster.map(loco => ({
+                id: loco.id,
+                label: loco.label,
+                address: loco.address,
+                speed: loco.speed,
+                direction: loco.direction,
+                route: loco.route
+            }));
+            localStorage.setItem('locoRoster', JSON.stringify(rosterToSave));
+        } catch (error) {
+            console.error('Error requesting roster from DCC:', error);
+            // Roster from localStorage remains available
+        }
     }
     
 
@@ -604,17 +734,107 @@ class Layout extends EventTarget {
         return blockWithRoute;
       }
       
-      addLogEntry(source, msg) {  
+      addLogEntry(source, msg, isDebug = false) {  
         let me=this;
-        console.log(`${source}: ${msg}`);
+        // Only log to console for important messages (not isDebug)
+        if (!isDebug) {
+          console.log(`${source}: ${msg}`);
+        }
         const logEntry = {
           source: source,
           message: msg,
           timestamp: new Date().toLocaleTimeString()
         };
         me.state.logEntries.push(logEntry);
+        // Keep only last 100 entries to prevent memory buildup
+        if (me.state.logEntries.length > 100) {
+          me.state.logEntries.shift();
+        }
       }
 
+      compareLocoCalibrations() {
+        // Compare calibration across all locos to identify inconsistencies
+        const comparison = {
+          timestamp: Date.now(),
+          locos: []
+        };
+
+        this.state.roster.forEach(loco => {
+          try {
+            const calibData = loco.exportCalibrationForComparison();
+            if (calibData && calibData.blockSummaries) {
+              comparison.locos.push(calibData);
+            }
+          } catch (error) {
+            console.error(`Error exporting calibration for loco ${loco?.label}:`, error);
+          }
+        });
+
+        // Find blocks measured by multiple locos
+        const blockMap = {};
+        comparison.locos.forEach(loco => {
+          if (!loco || !loco.blockSummaries) return;
+          loco.blockSummaries.forEach(block => {
+            if (!block || !block.blockId) return;
+            if (!blockMap[block.blockId]) {
+              blockMap[block.blockId] = [];
+            }
+            blockMap[block.blockId].push({
+              locoLabel: loco.locoLabel,
+              avgMeasured: block.avgMeasured || 0,
+              consistency: block.consistency || 0,
+              linearity: block.linearity || false,
+              count: block.count || 0
+            });
+          });
+        });
+
+        // Analyze consistency between locos
+        const blockAnalysis = {};
+        Object.entries(blockMap).forEach(([blockId, measurements]) => {
+          // Include all blocks with measurements, not just those with multiple locos
+          if (measurements.length >= 1) {
+            const validMeasurements = measurements.filter(m => 
+              m && typeof m.avgMeasured === 'number' && m.avgMeasured > 0
+            );
+            
+            if (validMeasurements.length === 0) return; // Skip if no valid data
+            
+            const averages = validMeasurements.map(m => m.avgMeasured);
+            const avg = averages.reduce((a, v) => a + v, 0) / averages.length;
+            const variance = averages.reduce((a, v) => a + Math.pow(v - avg, 2), 0) / averages.length;
+            const stdDev = Math.sqrt(variance);
+            
+            // Get the existing track block length
+            const blockInfo = this.state.blockLookup[blockId];
+            const trackLength = blockInfo?.length || 0;
+
+            blockAnalysis[blockId] = {
+              blockId,
+              trackLength,
+              locoCount: validMeasurements.length,
+              measurements: validMeasurements,
+              groupAverage: parseFloat(avg.toFixed(1)),
+              groupStdDev: parseFloat(stdDev.toFixed(1)),
+              groupConsistency: parseFloat(((1 - stdDev / avg) * 100).toFixed(1)),
+              allLinear: measurements.every(m => m.linearity)
+            };
+          }
+        });
+
+        return {
+          ...comparison,
+          blockAnalysis
+        };
+      }
+
+      getAllCalibrationDataExport() {
+        // Export all calibration data in a structured format
+        return {
+          exportTime: new Date().toISOString(),
+          locos: this.state.roster.map(loco => loco.getAllCalibrationData())
+        };
+      }
   }
   
   export default Layout;
